@@ -1,3 +1,4 @@
+#!/usr/local/bin/perl
 ###
 #
 # Enforces group writability, and proper group ownership on the /data directory of ACA servers.
@@ -13,8 +14,14 @@ use Cwd;
 my %valid_groups = ("acadev_servers", 1, "acadev_logs", 1);
 my $group_to_set = "acadev_servers";
 my $valid_base_dir = "/data";
+my $log_path = "/data/fix_permissions_log";
 
 my $path = join(" ", @ARGV);
+
+if (!$path) {
+    print "You need to give a path to fix.\n";
+    exit;
+}
 
 process($path);
 
@@ -64,7 +71,7 @@ sub show_warning {
     my $path = shift;
     my $trouble = shift;
 
-    warn "Error with $path: $trouble\n";
+    warn_and_log("Error with $path: $trouble");
 }
 
 # Takes the current permissions for a path, and if it's a directory,
@@ -83,8 +90,10 @@ sub fix_path {
         $new_perm = (stat $fh)[2] | 0070;
     }
 
+    my $uid = (stat $fh)[4];
     my $display = sprintf "%o", $new_perm;
-    warn "Updating $path to $display\n";
+    my $username = getpwuid($uid) || "";
+    warn_and_log("Updating $path to $display - owner uid: $uid ($username)");
     close $fh;
 
     chmod($new_perm, $path) || show_warning($path, $!);
@@ -95,12 +104,13 @@ sub fix_path {
 sub fix_group {
     my $path = shift;
 
-    warn "Setting group owner of $path to $group_to_set\n";
 
     open(my $file, $path) || show_warning($path, $!) & return 0;
     my $uid = (stat($file))[4];
     my $new_gid = getgrnam($group_to_set);
 
+    my $username = getpwuid($uid) || "";
+    warn_and_log("Setting group owner of $path to $group_to_set.  Owner uid: $uid ($username)");
     chown($uid, $new_gid, $path) || show_warning($path, $!);
 }
 
@@ -144,9 +154,21 @@ sub check_on_data {
     my $actual = Cwd::realpath($path);
 
     if (index($actual, $valid_base_dir)) {
-        warn "$path is actually $actual, which isn't on $valid_base_dir\n";
+        warn_and_log("$path is actually $actual, which isn't on $valid_base_dir");
         return 0;
     }
 
     return 1;
 }
+
+# Warn about the changes made, and log them.
+sub warn_and_log {
+    my $msg = shift;
+
+    warn $msg."\n";
+
+    open (my $handle, ">>", $log_path) or die "Can't open log file $log_path: $!";
+    print $handle $msg ."\n";
+    close $handle;
+}
+
