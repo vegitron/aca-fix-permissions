@@ -1,0 +1,152 @@
+###
+#
+# Enforces group writability, and proper group ownership on the /data directory of ACA servers.
+# Usage:
+#       fix_permissions <PATH>
+#
+###
+
+use strict;
+use Fcntl ':mode';
+use Cwd;
+
+my %valid_groups = ("acadev_servers", 1, "acadev_logs", 1);
+my $group_to_set = "acadev_servers";
+my $valid_base_dir = "/data";
+
+my $path = join(" ", @ARGV);
+
+process($path);
+
+# To prevent infinite recursion through symlinks
+my %seen_paths;
+
+# Primary entry point - recursive handling of paths
+sub process {
+    my $path = shift;
+    my $base = shift || "";
+
+    $path = "$base$path";
+
+    my $actual = Cwd::realpath($path);
+
+    if ($seen_paths{$actual}) {
+        return;
+    }
+    $seen_paths{$actual} = 1;
+
+    if (!-e $path) {
+        warn "Skipping $path, doesn't exist";
+        return;
+    }
+
+    check_on_data($path) || return;
+    if (!check_permissions($path)) {
+        fix_path($path);
+    }
+    if (!check_group($path)) {
+        fix_group($path);
+    }
+
+    if (-d $path) {
+        opendir(my $dir, $path) || show_warning($path, $!) & next;
+        my @subs = readdir($dir);
+
+        foreach my $sub (@subs) {
+            next if $sub eq ".";
+            next if $sub eq "..";
+            process($sub, "$path/");
+        }
+    }
+}
+
+sub show_warning {
+    my $path = shift;
+    my $trouble = shift;
+
+    warn "Error with $path: $trouble\n";
+}
+
+# Takes the current permissions for a path, and if it's a directory,
+# ORs it with group read/write/execute.  Otherwise ORs it with group
+# read/write.
+sub fix_path {
+    my $path = shift;
+
+    open (my $fh, "<", $path);
+
+    my $new_perm;
+    if (-d $path) {
+        $new_perm = (stat $fh)[2] | 0060;
+    }
+    else {
+        $new_perm = (stat $fh)[2] | 0070;
+    }
+
+    my $display = sprintf "%o", $new_perm;
+    warn "Updating $path to $display\n";
+    close $fh;
+
+    chmod($new_perm, $path) || show_warning($path, $!);
+}
+
+# Sets the group for a path to a default group.  This is the group of users,
+# not the log writers groups.
+sub fix_group {
+    my $path = shift;
+
+    warn "Setting group owner of $path to $group_to_set\n";
+
+    open(my $file, $path) || show_warning($path, $!) & return 0;
+    my $uid = (stat($file))[4];
+    my $new_gid = getgrnam($group_to_set);
+
+    chown($uid, $new_gid, $path) || show_warning($path, $!);
+}
+
+# Verifies that a path is group writable.
+sub check_permissions {
+    my $path = shift;
+    open(my $file, $path) || show_warning($path, $!) & return 0;
+    my ($permissions, $gid) = (stat($file))[2, 5];
+    close ($file);
+
+    my $group_write = ($permissions & S_IWGRP) >> 3;
+
+    # Mapping bit values to booleans
+    if ($group_write) {
+        return 1;
+    }
+    return 0;
+}
+
+# Returns true if the group owner of a path is in the valid groups
+# list, false otherwise.
+sub check_group {
+    my $path = shift;
+    open(my $file, $path) || show_warning($path, $!) & return 0;
+    my ($permissions, $gid) = (stat($file))[2, 5];
+    close ($file);
+
+    my $group_name =  getgrgid($gid);
+
+    if (!$valid_groups{$group_name}) {
+        return 0;
+    }
+    return 1;
+}
+
+# Verifies that the path is actually hosted on /data/.  Need to make sure
+# we don't get system level write access with a symlink to /.
+sub check_on_data {
+    my $path = shift;
+
+    my $actual = Cwd::realpath($path);
+
+    if (index($actual, $valid_base_dir)) {
+        warn "$path is actually $actual, which isn't on $valid_base_dir\n";
+        return 0;
+    }
+
+    return 1;
+}
